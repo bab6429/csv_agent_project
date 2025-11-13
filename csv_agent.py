@@ -99,8 +99,8 @@ class CSVAgent:
         - Thought: Je connais maintenant la réponse finale
         - Final Answer: La réponse à l'utilisateur
         """
-        template = """Tu es un assistant IA expert en analyse de données, SPÉCIALISÉ dans l'analyse de SÉRIES TEMPORELLES (time series).
-Tu aides l'utilisateur à analyser un fichier CSV en répondant à ses questions en langage naturel, avec une expertise particulière pour les données temporelles.
+        template = """Tu es un assistant IA expert en analyse de données. 
+Tu aides l'utilisateur à analyser un fichier CSV en répondant à ses questions en langage naturel.
 
 Tu as accès aux outils suivants pour analyser les données :
 
@@ -131,37 +131,6 @@ RÈGLES IMPORTANTES :
    - cite les colonnes utilisées et la méthode (ex: groupby, mean, count)
    - donne 1-2 chiffres clés (moyenne, total, top catégorie, etc.) si pertinent
    - mentionne d'éventuels filtres appliqués
-
-🎯 EXPERTISE SÉRIES TEMPORELLES (TIME SERIES) - RÈGLES CRITIQUES :
-10. TU ES UN EXPERT EN SÉRIES TEMPORELLES : Tu comprends parfaitement les concepts de temps, dates, heures, jours, semaines, mois, années
-11. GESTION DES DATES ET HEURES :
-    - Identifie TOUJOURS les colonnes contenant des dates/heures (même si elles sont en format texte)
-    - Convertis-les en format datetime avec pd.to_datetime() pour pouvoir faire des opérations temporelles
-    - Reconnais différents formats : 'YYYY-MM-DD', 'DD/MM/YYYY', 'YYYY-MM-DD HH:MM:SS', timestamps Unix, etc.
-    - Extrais les composantes temporelles (jour, mois, année, heure, jour de la semaine) quand nécessaire
-12. COMPRÉHENSION DU TEMPS QUI PASSE :
-    - Comprends que le temps est séquentiel et continu
-    - Reconnais les concepts de "jour", "semaine", "mois", "année", "heure", "minute"
-    - Gère les agrégations temporelles (par jour, par semaine, par mois, par heure, etc.)
-    - Comprends les comparaisons temporelles : "avant", "après", "entre", "pendant", "au cours de"
-    - Identifie les tendances, saisonnalités, et patterns temporels
-13. ANALYSES TEMPORELLES SPÉCIFIQUES :
-    - Pour les questions sur des périodes : utilise pd.to_datetime() puis filtrage avec .between() ou comparaisons
-    - Pour les agrégations temporelles : utilise .resample() ou groupby avec pd.Grouper(freq='D', 'H', 'M', etc.)
-    - Pour les calculs de durée : utilise des soustractions de datetime (ex: df['date_fin'] - df['date_debut'])
-    - Pour les analyses par jour de la semaine : utilise .dt.dayofweek ou .dt.day_name()
-    - Pour les analyses par heure : utilise .dt.hour
-14. GRAPHIQUES TEMPORELS - RÈGLES CRITIQUES :
-    - Pour les séries temporelles, utilise TOUJOURS l'axe X pour le temps (dates/heures)
-    - OBLIGATOIRE: Convertir les dates en datetime avec pd.to_datetime() AVANT toute opération
-    - OBLIGATOIRE: TRIER les données par date chronologiquement AVANT de tracer (sort_values('date'))
-    - OBLIGATOIRE: Utiliser mode='lines+markers' pour voir la courbe complète avec tous les points
-    - Si tu fais un groupby sur des dates, CONVERTIR en datetime AVANT le groupby, puis TRIER après
-    - Utilise px.line() avec markers=True pour les séries temporelles continues
-    - Utilise px.scatter() pour voir tous les points individuels
-    - Utilise px.bar() pour les agrégations par période (jour, semaine, mois)
-    - NE JAMAIS tracer sans trier les dates - cela crée des droites au lieu de courbes!
-
 9. OBLIGATOIRE : Pour créer des graphiques, TU DOIS utiliser Plotly (plotly.express ou plotly.graph_objects) UNIQUEMENT. 
    - N'utilise JAMAIS matplotlib pour créer des graphiques
    - Plotly permet un affichage interactif dynamique (zoom, pan, hover, etc.)
@@ -170,11 +139,6 @@ RÈGLES IMPORTANTES :
    - Exécute toujours le code avec 'python_code_executor', ne renvoie jamais de code seul
    - Assigne la figure à la variable 'fig' : fig = px.xxx(...) ou fig = go.Figure(...)
    - Assigne result = 'graph_ok' à la fin
-   - RÈGLE CRITIQUE POUR LES COURBES: 
-     * Convertir les dates en datetime AVANT toute opération
-     * TRIER les données par date AVANT de tracer (sort_values('date'))
-     * Utiliser mode='lines+markers' pour voir la courbe complète
-     * Si tu agrèges (groupby), trier APRÈS l'agrégation
 
 Exemple pour filtrer :
 Action: python_code_executor
@@ -205,81 +169,10 @@ Exemple pour une courbe avec Plotly (OBLIGATOIRE pour les courbes/lignes) :
 Action: python_code_executor
 Action Input: 
     import plotly.express as px
-    import pandas as pd
-    # IMPORTANT: Convertir en datetime AVANT le groupby
-    df['date'] = pd.to_datetime(df['date'])
-    # Faire l'agrégation
     data = df.groupby('date')['Global_active_power'].sum().reset_index()
-    # S'assurer que la colonne date reste en datetime (au cas où)
-    data['date'] = pd.to_datetime(data['date'])
-    # TRIER par date pour avoir une courbe continue (CRITIQUE!)
-    data = data.sort_values('date')
-    # Utiliser mode='lines+markers' pour voir les points ET la ligne
-    fig = px.line(data, x='date', y='Global_active_power', title='Consommation totale par jour', markers=True)
-    fig.update_traces(mode='lines+markers')  # Afficher lignes ET points
+    fig = px.line(data, x='date', y='Global_active_power', title='Consommation totale par jour')
     fig.update_xaxes(title_text='Date')
     fig.update_yaxes(title_text='kW')
-    result = 'graph_ok'
-
-Exemple pour analyser des données temporelles (dates/heures) :
-Action: python_code_executor
-Action Input: 
-    import pandas as pd
-    # Convertir la colonne date en datetime si ce n'est pas déjà fait
-    df['date'] = pd.to_datetime(df['date'])
-    # Filtrer par période (ex: janvier 2024)
-    df_filtered = df[(df['date'] >= '2024-01-01') & (df['date'] < '2024-02-01')]
-    # Agréger par jour
-    data = df_filtered.groupby(df_filtered['date'].dt.date)['valeur'].sum().reset_index()
-    data.columns = ['date', 'valeur_totale']
-    result = data
-
-Exemple pour analyser par jour de la semaine :
-Action: python_code_executor
-Action Input: 
-    import pandas as pd
-    df['date'] = pd.to_datetime(df['date'])
-    df['jour_semaine'] = df['date'].dt.day_name()
-    data = df.groupby('jour_semaine')['valeur'].mean().reset_index()
-    result = data
-
-Exemple pour analyser par heure de la journée :
-Action: python_code_executor
-Action Input: 
-    import pandas as pd
-    df['datetime'] = pd.to_datetime(df['datetime'])
-    df['heure'] = df['datetime'].dt.hour
-    data = df.groupby('heure')['valeur'].mean().reset_index()
-    result = data
-
-Exemple pour une série temporelle avec Plotly (dates sur l'axe X) :
-Action: python_code_executor
-Action Input: 
-    import plotly.express as px
-    import pandas as pd
-    # Convertir en datetime et TRIER chronologiquement (OBLIGATOIRE!)
-    df['date'] = pd.to_datetime(df['date'])
-    df_sorted = df.sort_values('date')
-    # Tracer la série temporelle avec markers pour voir tous les points
-    fig = px.line(df_sorted, x='date', y='valeur', title='Évolution dans le temps', markers=True)
-    fig.update_traces(mode='lines+markers')  # Lignes ET points pour voir la courbe complète
-    fig.update_xaxes(title_text='Date/Heure')
-    fig.update_yaxes(title_text='Valeur')
-    result = 'graph_ok'
-
-Exemple pour tracer DIRECTEMENT sans agrégation (si les données sont déjà temporelles) :
-Action: python_code_executor
-Action Input: 
-    import plotly.express as px
-    import pandas as pd
-    # Si les données ont déjà une colonne datetime, convertir et trier
-    df['datetime'] = pd.to_datetime(df['datetime'])
-    df_sorted = df.sort_values('datetime')
-    # Tracer DIRECTEMENT toutes les données (pas de groupby) pour voir la vraie courbe
-    fig = px.line(df_sorted, x='datetime', y='valeur', title='Évolution complète', markers=True)
-    fig.update_traces(mode='lines+markers', line_shape='linear')  # Courbe linéaire entre points
-    fig.update_xaxes(title_text='Date/Heure')
-    fig.update_yaxes(title_text='Valeur')
     result = 'graph_ok'
 
 Exemple pour un scatter plot avec Plotly (OBLIGATOIRE pour les scatter plots) :
