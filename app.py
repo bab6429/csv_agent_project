@@ -4,6 +4,9 @@ Interface Streamlit pour l'agent CSV
 import streamlit as st
 import pandas as pd
 import os
+import json
+import plotly.graph_objects as go
+import plotly.io as pio
 from csv_agent import CSVAgent
 from config import Config
 
@@ -104,6 +107,54 @@ if data_file is not None:
     # Interface de chat
     st.header("💬 Posez vos questions")
     
+    # Fonction helper pour afficher une réponse avec graphiques
+    def display_answer_with_plots(answer_text):
+        """Affiche une réponse de l'agent avec détection des graphiques"""
+        # Séparer le texte des marqueurs de graphiques
+        text_lines = []
+        plotly_markers = []
+        plot_b64_markers = []
+        plot_file_markers = []
+        
+        for line in answer_text.splitlines():
+            if line.startswith("PLOTLY_JSON::"):
+                plotly_markers.append(line)
+            elif line.startswith("PLOT_B64::"):
+                plot_b64_markers.append(line)
+            elif line.startswith("PLOT::"):
+                plot_file_markers.append(line)
+            else:
+                text_lines.append(line)
+        
+        # Afficher le texte (sans les marqueurs)
+        text_to_display = "\n".join(text_lines)
+        if text_to_display.strip():
+            st.write(text_to_display)
+        
+        # Afficher les graphiques Plotly
+        for line in plotly_markers:
+            plotly_json_str = line.replace("PLOTLY_JSON::", "").strip()
+            if plotly_json_str:
+                try:
+                    # Reconstruire la figure Plotly à partir du JSON
+                    fig = pio.from_json(plotly_json_str)
+                    st.plotly_chart(fig, use_container_width=True)
+                except Exception as e:
+                    st.warning(f"Erreur lors de l'affichage du graphique Plotly: {e}")
+        
+        # Afficher les graphiques base64 (rétrocompatibilité)
+        for line in plot_b64_markers:
+            import base64
+            b64_data = line.replace("PLOT_B64::", "").strip()
+            if b64_data:
+                st.image(base64.b64decode(b64_data))
+        
+        # Afficher les graphiques fichiers (rétrocompatibilité)
+        for line in plot_file_markers:
+            img_path = line.replace("PLOT::", "").strip()
+            if img_path and os.path.exists(img_path):
+                st.image(img_path)
+    
     # Afficher l'historique du chat
     chat_container = st.container()
     with chat_container:
@@ -111,7 +162,7 @@ if data_file is not None:
             with st.chat_message("user"):
                 st.write(question)
             with st.chat_message("assistant"):
-                st.write(answer)
+                display_answer_with_plots(answer)
     
     # Exemples de questions
     with st.expander("💡 Exemples de questions"):
@@ -141,25 +192,8 @@ if data_file is not None:
             with st.spinner("🤔 L'agent réfléchit..."):
                 try:
                     answer = st.session_state.agent.query(question)
-                    # Afficher le texte
-                    st.write(answer)
-                    # Détecter et afficher d'éventuels graphiques
-                    if isinstance(answer, str):
-                        # Cas base64
-                        if "PLOT_B64::" in answer:
-                            import base64
-                            for line in answer.splitlines():
-                                if line.startswith("PLOT_B64::"):
-                                    b64_data = line.replace("PLOT_B64::", "").strip()
-                                    if b64_data:
-                                        st.image(base64.b64decode(b64_data), use_column_width=True)
-                        # Cas fichier
-                        if "PLOT::" in answer:
-                            for line in answer.splitlines():
-                                if line.startswith("PLOT::"):
-                                    img_path = line.replace("PLOT::", "").strip()
-                                    if img_path and os.path.exists(img_path):
-                                        st.image(img_path, use_column_width=True)
+                    # Afficher le texte et les graphiques
+                    display_answer_with_plots(answer)
                     
                     # Ajouter à l'historique
                     st.session_state.chat_history.append((question, answer))

@@ -18,10 +18,13 @@ class Config:
     MODEL_NAME = "gemini-2.0-flash"
     TEMPERATURE = 0  # 0 = déterministe, 1 = créatif
     
-    # Paramètres de l'agent
-    MAX_ITERATIONS = 10  # Nombre max d'itérations de l'agent
-    MAX_EXECUTION_TIME = 60  # Timeout en secondes
+    # Paramètres de l'agent (réduits pour éviter l'épuisement des ressources)
+    MAX_ITERATIONS = 5  # Nombre max d'itérations de l'agent (réduit de 10 à 5)
+    MAX_EXECUTION_TIME = 30  # Timeout en secondes (réduit de 60 à 30)
     VERBOSE = False  # Afficher les étapes de raisonnement
+    
+    # Délai entre les appels LLM pour éviter les erreurs 429 (resource exhausted)
+    LLM_REQUEST_DELAY = 1.5  # Délai en secondes entre chaque appel à l'API Gemini
     
     # Paramètres d'affichage
     MAX_ROWS_DISPLAY = 100  # Nombre max de lignes à afficher
@@ -48,6 +51,7 @@ class Config:
         print(f"   - Temperature : {cls.TEMPERATURE}")
         print(f"   - Max iterations : {cls.MAX_ITERATIONS}")
         print(f"   - Timeout : {cls.MAX_EXECUTION_TIME}s")
+        print(f"   - Délai entre appels LLM : {cls.LLM_REQUEST_DELAY}s")
         print(f"   - Verbose : {cls.VERBOSE}")
         print(f"   - Langue : {cls.LANGUAGE}")
         if cls.GOOGLE_API_KEY:

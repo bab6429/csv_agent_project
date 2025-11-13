@@ -5,9 +5,12 @@ import pandas as pd
 import numpy as np
 import os
 import uuid
+import json
 import matplotlib
 matplotlib.use("Agg")  # backend non interactif pour génération de fichiers
 import matplotlib.pyplot as plt
+import plotly.graph_objects as go
+import plotly.express as px
 from typing import Optional
 from langchain.tools import Tool
 from langchain.pydantic_v1 import BaseModel, Field
@@ -189,14 +192,51 @@ class CSVTools:
                 'df': self.df.copy(),
                 'pd': pd,
                 'np': np,
-                'plt': plt
+                'plt': plt,
+                'go': go,
+                'px': px,
+                'plotly': __import__('plotly'),
             }
             
             # Exécuter le code
             plt.close('all')  # nettoie d'éventuelles figures précédentes
             exec(code, {"__builtins__": __builtins__}, local_vars)
             
-            # Si une figure matplotlib a été produite, la sauvegarder et retourner un marqueur
+            # Vérifier si une figure Plotly a été créée (priorité à Plotly pour l'affichage dynamique)
+            plotly_fig = None
+            if 'fig' in local_vars:
+                try:
+                    from plotly.graph_objects import Figure
+                    if isinstance(local_vars['fig'], Figure):
+                        plotly_fig = local_vars['fig']
+                        # Vérifier que la figure n'est pas vide
+                        if plotly_fig.data and len(plotly_fig.data) > 0:
+                            # Vérifier que les données ne sont pas toutes vides/None
+                            has_data = False
+                            for trace in plotly_fig.data:
+                                if hasattr(trace, 'x') and trace.x is not None and len(trace.x) > 0:
+                                    has_data = True
+                                    break
+                                if hasattr(trace, 'y') and trace.y is not None and len(trace.y) > 0:
+                                    has_data = True
+                                    break
+                            
+                            if not has_data:
+                                # La figure est vide, on ne la retourne pas
+                                plotly_fig = None
+                except Exception as e:
+                    plotly_fig = None
+            
+            if plotly_fig is not None:
+                # Sérialiser la figure Plotly en JSON pour transmission
+                try:
+                    plotly_json = plotly_fig.to_json()
+                    return f"📈 Graphique interactif généré\nPLOTLY_JSON::{plotly_json}"
+                except Exception as e:
+                    # Si la sérialisation échoue, on continue avec matplotlib
+                    pass
+            
+            # Si aucune figure Plotly, vérifier matplotlib (rétrocompatibilité)
             fig = None
             if 'fig' in local_vars:
                 try:
@@ -270,18 +310,50 @@ class CSVTools:
                 description="""Exécute du code Python personnalisé pour des analyses avancées et des graphiques.
                 Contexte:
                 - DataFrame: df (copie des données)
-                - Librairies: pd (pandas), np (numpy), plt (matplotlib.pyplot)
+                - Librairies: pd (pandas), np (numpy), go (plotly.graph_objects), px (plotly.express)
+                IMPORTANT POUR LES GRAPHIQUES :
+                - OBLIGATOIRE: Utilise UNIQUEMENT Plotly pour créer des graphiques (px ou go)
+                - N'utilise JAMAIS matplotlib pour les graphiques
+                - Plotly permet un affichage interactif dynamique (zoom, pan, hover)
                 Résultats attendus:
                 - Pour renvoyer une valeur/tableau: assigne à 'result'
                   ex: result = df[df['prix'] > 100].shape[0]
-                - Pour tracer un graphique: crée une figure matplotlib
-                  ex:
-                      import matplotlib.pyplot as plt
-                      fig, ax = plt.subplots()
-                      df['age'].hist(ax=ax, bins=20)
-                      ax.set_title('Répartition des âges')
+                - Pour tracer un graphique interactif: utilise Plotly OBLIGATOIREMENT
+                  ex histogramme:
+                      import plotly.express as px
+                      # Vérifier que la colonne existe et filtrer les valeurs manquantes
+                      if 'age' in df.columns:
+                          df_clean = df[df['age'].notna()]
+                          if len(df_clean) > 0:
+                              fig = px.histogram(df_clean, x='age', nbins=20, title='Répartition des âges')
+                              fig.update_xaxes(title_text='Âge')
+                              fig.update_yaxes(title_text='Fréquence')
+                              result = 'graph_ok'
+                          else:
+                              result = 'Aucune donnée disponible'
+                      else:
+                          result = 'Colonne introuvable. Colonnes: ' + str(list(df.columns))
+                  ex ligne/courbe:
+                      import plotly.express as px
+                      fig = px.line(df, x='date', y='valeur', title='Évolution dans le temps')
                       result = 'graph_ok'
-                Les figures sont automatiquement sauvegardées et affichées dans l'interface."""
+                  ex scatter:
+                      import plotly.express as px
+                      fig = px.scatter(df, x='x', y='y', title='Nuage de points')
+                      result = 'graph_ok'
+                  ex barres:
+                      import plotly.express as px
+                      data = df.groupby('cat')['val'].sum().reset_index()
+                      fig = px.bar(data, x='cat', y='val', title='Valeurs par catégorie')
+                      result = 'graph_ok'
+                  Pour plus de contrôle, utilise plotly.graph_objects (go):
+                      import plotly.graph_objects as go
+                      fig = go.Figure()
+                      fig.add_trace(go.Scatter(x=df['x'], y=df['y'], mode='lines'))
+                      fig.update_layout(title='Mon graphique')
+                      result = 'graph_ok'
+                Les figures Plotly sont automatiquement détectées et affichées de manière interactive dans l'interface.
+                IMPORTANT: Assigne toujours la figure à 'fig' et assigne result = 'graph_ok' à la fin."""
             ),
         ]
         
