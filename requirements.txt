@@ -1,9 +1,12 @@
 langchain>=0.2,<0.4
 langchain-community>=0.2,<0.4
 langchain-google-genai>=2.0.10,<3.0.0
+langchain-ollama>=0.1.0
 google-generativeai>=0.8.5
+requests>=2.31.0
 pandas==2.1.4
 numpy==1.26.2
+scipy>=1.11.0
 matplotlib==3.8.2
 seaborn==0.13.0
 plotly>=5.18.0

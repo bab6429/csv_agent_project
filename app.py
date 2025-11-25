@@ -4,11 +4,7 @@ Interface Streamlit pour l'agent CSV
 import streamlit as st
 import pandas as pd
 import os
-import json
-import plotly.graph_objects as go
-import plotly.io as pio
 from csv_agent import CSVAgent
-from config import Config
 
 # Configuration de la page
 st.set_page_config(
@@ -28,19 +24,27 @@ L'agent IA analysera vos données et répondra à vos questions.
 with st.sidebar:
     st.header("⚙️ Configuration")
 
-    # Vérification de la clé API
+    # Information sur le LLM utilisé
+    st.info("""
+    **LLM utilisé :**
+    - Ollama (local) si disponible
+    - Sinon Gemini (nécessite une clé API)
+    """)
+    
+    # Vérification de la clé API (optionnelle si Ollama est disponible)
     api_key = os.getenv("GOOGLE_API_KEY", "")
     if not api_key:
-        st.error("⚠️ Clé API Google Gemini manquante")
+        st.warning("⚠️ Clé API Google Gemini non configurée")
+        st.caption("Si Ollama n'est pas disponible, une clé API sera nécessaire")
         api_key = st.text_input(
-            "Entrez votre clé API Google Gemini:",
+            "Entrez votre clé API Google Gemini (optionnel si Ollama est installé):",
             type="password",
             help="Obtenez votre clé sur https://makersuite.google.com/app/apikey"
         )
         if api_key:
             os.environ["GOOGLE_API_KEY"] = api_key
     else:
-        st.success("✅ Clé API configurée")
+        st.success("✅ Clé API configurée (fallback Gemini)")
         key_preview = api_key[:10] + "..." + api_key[-4:]
         st.text(f"Clé : {key_preview}")
 
@@ -107,53 +111,6 @@ if data_file is not None:
     # Interface de chat
     st.header("💬 Posez vos questions")
     
-    # Fonction helper pour afficher une réponse avec graphiques
-    def display_answer_with_plots(answer_text):
-        """Affiche une réponse de l'agent avec détection des graphiques"""
-        # Séparer le texte des marqueurs de graphiques
-        text_lines = []
-        plotly_markers = []
-        plot_b64_markers = []
-        plot_file_markers = []
-        
-        for line in answer_text.splitlines():
-            if line.startswith("PLOTLY_JSON::"):
-                plotly_markers.append(line)
-            elif line.startswith("PLOT_B64::"):
-                plot_b64_markers.append(line)
-            elif line.startswith("PLOT::"):
-                plot_file_markers.append(line)
-            else:
-                text_lines.append(line)
-        
-        # Afficher le texte (sans les marqueurs)
-        text_to_display = "\n".join(text_lines)
-        if text_to_display.strip():
-            st.write(text_to_display)
-        
-        # Afficher les graphiques Plotly
-        for line in plotly_markers:
-            plotly_json_str = line.replace("PLOTLY_JSON::", "").strip()
-            if plotly_json_str:
-                try:
-                    # Reconstruire la figure Plotly à partir du JSON
-                    fig = pio.from_json(plotly_json_str)
-                    st.plotly_chart(fig, use_container_width=True)
-                except Exception as e:
-                    st.warning(f"Erreur lors de l'affichage du graphique Plotly: {e}")
-        
-        # Afficher les graphiques base64 (rétrocompatibilité)
-        for line in plot_b64_markers:
-            import base64
-            b64_data = line.replace("PLOT_B64::", "").strip()
-            if b64_data:
-                st.image(base64.b64decode(b64_data))
-        
-        # Afficher les graphiques fichiers (rétrocompatibilité)
-        for line in plot_file_markers:
-            img_path = line.replace("PLOT::", "").strip()
-            if img_path and os.path.exists(img_path):
-                st.image(img_path)
     
     # Afficher l'historique du chat
     chat_container = st.container()
@@ -162,21 +119,18 @@ if data_file is not None:
             with st.chat_message("user"):
                 st.write(question)
             with st.chat_message("assistant"):
-                display_answer_with_plots(answer)
+                st.write(answer)
     
     # Exemples de questions
     with st.expander("💡 Exemples de questions"):
         st.markdown("""
-        - Quelle est la moyenne de la colonne X ?
-        - Combien de lignes ont une valeur > 100 dans la colonne Y ?
-        - Quelle est la corrélation entre les colonnes A et B ?
-        - Affiche-moi les 10 premières lignes où la colonne Z est égale à "valeur"
-        - Quelles sont les statistiques pour la colonne W ?
+        - Quelle est la structure du fichier ?
+        - Affiche-moi les 10 premières lignes
+        - Quelles sont les statistiques pour la colonne X ?
         - Y a-t-il des valeurs manquantes ?
-        - Quelle est la valeur maximale de la colonne V ?
-        - Trace l'histogramme de la colonne Age
-        - Fais un scatter entre Salaire et Age avec un titre
-        - Affiche la courbe des ventes par mois
+        - Quelle est la corrélation entre les colonnes A et B ?
+        - Donne-moi la matrice de corrélation complète
+        - Combien de lignes et de colonnes contient le fichier ?
         """)
     
     # Input pour la question
@@ -192,8 +146,8 @@ if data_file is not None:
             with st.spinner("🤔 L'agent réfléchit..."):
                 try:
                     answer = st.session_state.agent.query(question)
-                    # Afficher le texte et les graphiques
-                    display_answer_with_plots(answer)
+                    # Afficher la réponse
+                    st.write(answer)
                     
                     # Ajouter à l'historique
                     st.session_state.chat_history.append((question, answer))
@@ -237,7 +191,7 @@ else:
 st.divider()
 st.markdown("""
 <div style='text-align: center; color: gray;'>
-    Développé avec ❤️ en utilisant Streamlit et Google Gemini
+    Développé avec ❤️ en utilisant Streamlit, Ollama et Google Gemini
 </div>
 """, unsafe_allow_html=True)
 

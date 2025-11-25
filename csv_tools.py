@@ -1,19 +1,24 @@
 """
 Outils personnalisés pour l'analyse de fichiers CSV
 """
+import sys
+import warnings
 import pandas as pd
 import numpy as np
-import os
-import uuid
-import json
-import matplotlib
-matplotlib.use("Agg")  # backend non interactif pour génération de fichiers
-import matplotlib.pyplot as plt
-import plotly.graph_objects as go
-import plotly.express as px
-from typing import Optional
 from langchain.tools import Tool
-from langchain.pydantic_v1 import BaseModel, Field
+from scipy import stats
+from datetime import datetime
+
+# Configuration de l'encodage UTF-8 pour Windows
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+        sys.stderr.reconfigure(encoding='utf-8')
+    except (AttributeError, ValueError):
+        # Fallback pour les anciennes versions de Python
+        import codecs
+        sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer, 'strict')
+        sys.stderr = codecs.getwriter('utf-8')(sys.stderr.buffer, 'strict')
 
 
 class CSVTools:
@@ -112,16 +117,6 @@ class CSVTools:
         
         return result
     
-    def query_data(self, query: str) -> str:
-        """
-        Exécute une requête sur les données (filtrage, agrégation, etc.)
-        
-        Args:
-            query: Description de la requête en langage naturel
-        """
-        # Cette fonction sera utilisée par l'agent pour formuler des requêtes plus complexes
-        return f"Pour exécuter des requêtes complexes, utilisez l'outil 'python_code_executor' avec du code pandas."
-    
     def get_correlation(self, col1: str, col2: str = "") -> str:
         """
         Calcule la corrélation entre deux colonnes ou affiche la matrice de corrélation
@@ -152,127 +147,394 @@ class CSVTools:
         else:
             return f"❌ La colonne '{col1}' doit être numérique"
     
-    def execute_python_code(self, code: str) -> str:
+    # ==================== OUTILS POUR SÉRIES TEMPORELLES ====================
+    
+    def detect_time_columns(self, query: str = "") -> str:
         """
-        Exécute du code Python pour des analyses personnalisées
-        ATTENTION : Utiliser avec précaution en production
+        Détecte automatiquement les colonnes contenant des dates/timestamps
+        
+        Returns:
+            Liste des colonnes temporelles détectées
+        """
+        time_columns = []
+        
+        for col in self.df.columns:
+            # Vérifier si le type est déjà datetime
+            if pd.api.types.is_datetime64_any_dtype(self.df[col]):
+                time_columns.append(col)
+                continue
+            
+            # Vérifier si le nom de la colonne suggère une date
+            col_lower = col.lower()
+            if any(keyword in col_lower for keyword in ['date', 'time', 'timestamp', 'jour', 'mois', 'année', 'year', 'month', 'day']):
+                # Essayer de convertir en datetime
+                try:
+                    # Supprimer le warning de format inference
+                    with warnings.catch_warnings():
+                        warnings.filterwarnings('ignore', category=UserWarning, message='.*Could not infer format.*')
+                        pd.to_datetime(self.df[col].dropna().head(10), errors='coerce')
+                    time_columns.append(col)
+                except:
+                    pass
+        
+        if time_columns:
+            result = f"📅 Colonnes temporelles détectées :\n\n"
+            for col in time_columns:
+                dtype = self.df[col].dtype
+                sample = self.df[col].dropna().head(3).tolist()
+                result += f"  • {col} (type: {dtype})\n"
+                result += f"    Exemples: {sample}\n"
+            return result
+        else:
+            return "❌ Aucune colonne temporelle détectée. Vérifiez que vos colonnes de dates sont au bon format."
+    
+    def calculate_trend(self, input_str: str = "") -> str:
+        """
+        Calcule la tendance (croissance/décroissance) d'une série temporelle
         
         Args:
-            code: Code Python à exécuter (utilisant 'df' comme DataFrame)
+            input_str: Format "column" ou "column,time_column"
         """
+        parts = [p.strip() for p in input_str.split(',')] if input_str else []
+        column = parts[0] if len(parts) > 0 else ""
+        time_column = parts[1] if len(parts) > 1 else ""
+        
+        if not column:
+            return "❌ Spécifiez au moins le nom de la colonne. Format: 'column' ou 'column,time_column'"
+        
+        if column not in self.df.columns:
+            return f"❌ Colonne '{column}' introuvable"
+        
+        if not pd.api.types.is_numeric_dtype(self.df[column]):
+            return f"❌ La colonne '{column}' doit être numérique"
+        
+        # Détecter la colonne temporelle si non fournie
+        if not time_column:
+            time_cols = [col for col in self.df.columns if pd.api.types.is_datetime64_any_dtype(self.df[col])]
+            if not time_cols:
+                # Essayer de détecter automatiquement
+                for col in self.df.columns:
+                    if 'date' in col.lower() or 'time' in col.lower():
+                        try:
+                            self.df[col] = pd.to_datetime(self.df[col])
+                            time_cols = [col]
+                            break
+                        except:
+                            pass
+            
+            if not time_cols:
+                return "❌ Aucune colonne temporelle trouvée. Spécifiez-la avec le paramètre time_column."
+            time_column = time_cols[0]
+        
+        # Préparer les données
+        df_clean = self.df[[time_column, column]].dropna()
+        if len(df_clean) < 2:
+            return "❌ Pas assez de données pour calculer une tendance"
+        
+        # Convertir en datetime si nécessaire
+        if not pd.api.types.is_datetime64_any_dtype(df_clean[time_column]):
+            try:
+                df_clean[time_column] = pd.to_datetime(df_clean[time_column])
+            except:
+                return f"❌ Impossible de convertir '{time_column}' en datetime"
+        
+        # Trier par date
+        df_clean = df_clean.sort_values(time_column)
+        
+        # Calculer la tendance avec régression linéaire
+        x = np.arange(len(df_clean))
+        y = df_clean[column].values
+        
+        slope, intercept, r_value, p_value, std_err = stats.linregress(x, y)
+        
+        # Interprétation
+        if slope > 0:
+            direction = "📈 Croissance"
+        elif slope < 0:
+            direction = "📉 Décroissance"
+        else:
+            direction = "➡️ Stable"
+        
+        result = f"📊 Analyse de tendance pour '{column}' :\n\n"
+        result += f"{direction}\n"
+        result += f"Pente (tendance) : {slope:.4f}\n"
+        result += f"Coefficient de corrélation (R²) : {r_value**2:.4f}\n"
+        result += f"P-valeur : {p_value:.4f}\n"
+        
+        if p_value < 0.05:
+            result += "✅ Tendance statistiquement significative (p < 0.05)\n"
+        else:
+            result += "⚠️ Tendance non significative statistiquement (p >= 0.05)\n"
+        
+        # Calculer la variation totale
+        first_val = df_clean[column].iloc[0]
+        last_val = df_clean[column].iloc[-1]
+        variation = ((last_val - first_val) / first_val * 100) if first_val != 0 else 0
+        
+        result += f"\nValeur initiale : {first_val:.2f}\n"
+        result += f"Valeur finale : {last_val:.2f}\n"
+        result += f"Variation totale : {variation:+.2f}%"
+        
+        return result
+    
+    def calculate_moving_average(self, input_str: str = "") -> str:
+        """
+        Calcule la moyenne mobile d'une série temporelle
+        
+        Args:
+            input_str: Format "column,window" ou "column,window,time_column"
+        """
+        parts = [p.strip() for p in input_str.split(',')] if input_str else []
+        column = parts[0] if len(parts) > 0 else ""
+        window = parts[1] if len(parts) > 1 else "7"
+        time_column = parts[2] if len(parts) > 2 else ""
+        
+        if not column:
+            return "❌ Spécifiez au moins le nom de la colonne. Format: 'column,window' ou 'column,window,time_column'"
+        
+        if column not in self.df.columns:
+            return f"❌ Colonne '{column}' introuvable"
+        
         try:
-            # Si une API sandbox est configurée, on l'utilise en priorité
-            sandbox_url = os.getenv("SANDBOX_API_URL")
-            if sandbox_url:
+            window_int = int(window)
+        except:
+            window_int = 7
+        
+        if not pd.api.types.is_numeric_dtype(self.df[column]):
+            return f"❌ La colonne '{column}' doit être numérique"
+        
+        # Détecter la colonne temporelle si nécessaire
+        if time_column and time_column in self.df.columns:
+            df_work = self.df[[time_column, column]].copy()
+            if not pd.api.types.is_datetime64_any_dtype(df_work[time_column]):
                 try:
-                    import requests
-                    payload = {
-                        "code": code,
-                        "data_path": self.csv_path,
-                        "file_type": None,
-                    }
-                    resp = requests.post(
-                        sandbox_url.rstrip('/') + "/execute",
-                        json=payload,
-                        timeout=30,
-                    )
-                    if resp.ok:
-                        data = resp.json()
-                        text = data.get("result_text") or ""
-                        img_b64 = data.get("image_b64")
-                        if img_b64:
-                            return f"{text}\nPLOT_B64::{img_b64}"
-                        return text
-                except Exception:
-                    # Si l'API échoue, on retombe sur l'exécution locale
+                    df_work[time_column] = pd.to_datetime(df_work[time_column])
+                except:
                     pass
-
-            # Créer un environnement d'exécution sécurisé
-            local_vars = {
-                'df': self.df.copy(),
-                'pd': pd,
-                'np': np,
-                'plt': plt,
-                'go': go,
-                'px': px,
-                'plotly': __import__('plotly'),
-            }
+            df_work = df_work.sort_values(time_column)
+            series = df_work[column]
+        else:
+            series = self.df[column].sort_index()
+        
+        # Calculer la moyenne mobile
+        ma = series.rolling(window=window_int, min_periods=1).mean()
+        
+        result = f"📈 Moyenne mobile ({window_int} périodes) pour '{column}' :\n\n"
+        result += f"Valeurs calculées : {len(ma.dropna())} / {len(ma)}\n\n"
+        result += "Dernières valeurs :\n"
+        result += pd.DataFrame({
+            'Valeur originale': series.tail(10),
+            f'MA({window_int})': ma.tail(10)
+        }).to_string()
+        
+        return result
+    
+    def aggregate_by_period(self, input_str: str = "") -> str:
+        """
+        Agrège les données par période (jour, semaine, mois, année)
+        
+        Args:
+            input_str: Format "column,period,time_column,agg_func" (period et time_column optionnels)
+        """
+        parts = [p.strip() for p in input_str.split(',')] if input_str else []
+        column = parts[0] if len(parts) > 0 else ""
+        period = parts[1] if len(parts) > 1 else "M"
+        time_column = parts[2] if len(parts) > 2 else ""
+        agg_func = parts[3] if len(parts) > 3 else "mean"
+        
+        if not column:
+            return "❌ Spécifiez au moins le nom de la colonne. Format: 'column,period,time_column,agg_func'"
+        
+        if column not in self.df.columns:
+            return f"❌ Colonne '{column}' introuvable"
+        
+        # Détecter la colonne temporelle
+        if not time_column:
+            time_cols = [col for col in self.df.columns if pd.api.types.is_datetime64_any_dtype(self.df[col])]
+            if not time_cols:
+                for col in self.df.columns:
+                    if 'date' in col.lower() or 'time' in col.lower():
+                        try:
+                            self.df[col] = pd.to_datetime(self.df[col])
+                            time_cols = [col]
+                            break
+                        except:
+                            pass
             
-            # Exécuter le code
-            plt.close('all')  # nettoie d'éventuelles figures précédentes
-            exec(code, {"__builtins__": __builtins__}, local_vars)
+            if not time_cols:
+                return "❌ Aucune colonne temporelle trouvée"
+            time_column = time_cols[0]
+        
+        # Préparer les données
+        df_work = self.df[[time_column, column]].copy()
+        if not pd.api.types.is_datetime64_any_dtype(df_work[time_column]):
+            try:
+                df_work[time_column] = pd.to_datetime(df_work[time_column])
+            except:
+                return f"❌ Impossible de convertir '{time_column}' en datetime"
+        
+        df_work = df_work.dropna().sort_values(time_column)
+        df_work = df_work.set_index(time_column)
+        
+        # Mapper les fonctions d'agrégation
+        agg_map = {
+            'mean': 'mean',
+            'sum': 'sum',
+            'min': 'min',
+            'max': 'max',
+            'count': 'count',
+            'moyenne': 'mean',
+            'somme': 'sum',
+            'minimum': 'min',
+            'maximum': 'max',
+            'compte': 'count'
+        }
+        agg_func_clean = agg_map.get(agg_func.lower(), 'mean')
+        
+        # Mapper les périodes
+        period_map = {
+            'jour': 'D', 'day': 'D', 'd': 'D',
+            'semaine': 'W', 'week': 'W', 'w': 'W',
+            'mois': 'M', 'month': 'M', 'm': 'M',
+            'trimestre': 'Q', 'quarter': 'Q', 'q': 'Q',
+            'année': 'Y', 'year': 'Y', 'y': 'Y'
+        }
+        period_clean = period_map.get(period.lower(), period.upper())
+        
+        # Agréger
+        aggregated = df_work[column].resample(period_clean).agg(agg_func_clean)
+        
+        period_names = {
+            'D': 'jour',
+            'W': 'semaine',
+            'M': 'mois',
+            'Q': 'trimestre',
+            'Y': 'année'
+        }
+        period_name = period_names.get(period_clean, period_clean)
+        
+        result = f"📊 Agrégation par {period_name} ({agg_func_clean}) pour '{column}' :\n\n"
+        result += aggregated.to_string()
+        result += f"\n\nNombre de périodes : {len(aggregated)}"
+        
+        return result
+    
+    def detect_anomalies(self, input_str: str = "") -> str:
+        """
+        Détecte les anomalies dans une série temporelle
+        
+        Args:
+            input_str: Format "column,method,threshold" (method et threshold optionnels)
+        """
+        parts = [p.strip() for p in input_str.split(',')] if input_str else []
+        column = parts[0] if len(parts) > 0 else ""
+        method = parts[1] if len(parts) > 1 else "iqr"
+        threshold = parts[2] if len(parts) > 2 else "3"
+        
+        if not column:
+            return "❌ Spécifiez au moins le nom de la colonne. Format: 'column,method,threshold'"
+        
+        if column not in self.df.columns:
+            return f"❌ Colonne '{column}' introuvable"
+        
+        if not pd.api.types.is_numeric_dtype(self.df[column]):
+            return f"❌ La colonne '{column}' doit être numérique"
+        
+        series = self.df[column].dropna()
+        
+        if method.lower() in ['iqr', 'interquartile']:
+            Q1 = series.quantile(0.25)
+            Q3 = series.quantile(0.75)
+            IQR = Q3 - Q1
+            lower_bound = Q1 - 1.5 * IQR
+            upper_bound = Q3 + 1.5 * IQR
             
-            # Vérifier si une figure Plotly a été créée (priorité à Plotly pour l'affichage dynamique)
-            plotly_fig = None
-            if 'fig' in local_vars:
+            anomalies = series[(series < lower_bound) | (series > upper_bound)]
+            method_name = "IQR (Interquartile Range)"
+        else:  # zscore
+            try:
+                threshold_float = float(threshold)
+            except:
+                threshold_float = 3.0
+            
+            z_scores = np.abs(stats.zscore(series))
+            anomalies = series[z_scores > threshold_float]
+            method_name = f"Z-score (seuil: {threshold_float})"
+        
+        result = f"🔍 Détection d'anomalies ({method_name}) pour '{column}' :\n\n"
+        result += f"Nombre d'anomalies détectées : {len(anomalies)} / {len(series)} ({len(anomalies)/len(series)*100:.2f}%)\n\n"
+        
+        if len(anomalies) > 0:
+            result += "Anomalies détectées :\n"
+            result += anomalies.to_string()
+        else:
+            result += "✅ Aucune anomalie détectée"
+        
+        return result
+    
+    def calculate_growth_rate(self, input_str: str = "") -> str:
+        """
+        Calcule le taux de croissance entre périodes
+        
+        Args:
+            input_str: Format "column,time_column,period" (time_column et period optionnels)
+        """
+        parts = [p.strip() for p in input_str.split(',')] if input_str else []
+        column = parts[0] if len(parts) > 0 else ""
+        time_column = parts[1] if len(parts) > 1 else ""
+        period = parts[2] if len(parts) > 2 else "1"
+        
+        if not column:
+            return "❌ Spécifiez au moins le nom de la colonne. Format: 'column,time_column,period'"
+        
+        if column not in self.df.columns:
+            return f"❌ Colonne '{column}' introuvable"
+        
+        if not pd.api.types.is_numeric_dtype(self.df[column]):
+            return f"❌ La colonne '{column}' doit être numérique"
+        
+        try:
+            period_int = int(period)
+        except:
+            period_int = 1
+        
+        # Détecter la colonne temporelle si nécessaire
+        if time_column and time_column in self.df.columns:
+            df_work = self.df[[time_column, column]].copy()
+            if not pd.api.types.is_datetime64_any_dtype(df_work[time_column]):
                 try:
-                    from plotly.graph_objects import Figure
-                    if isinstance(local_vars['fig'], Figure):
-                        plotly_fig = local_vars['fig']
-                        # Vérifier que la figure n'est pas vide
-                        if plotly_fig.data and len(plotly_fig.data) > 0:
-                            # Vérifier que les données ne sont pas toutes vides/None
-                            has_data = False
-                            for trace in plotly_fig.data:
-                                if hasattr(trace, 'x') and trace.x is not None and len(trace.x) > 0:
-                                    has_data = True
-                                    break
-                                if hasattr(trace, 'y') and trace.y is not None and len(trace.y) > 0:
-                                    has_data = True
-                                    break
-                            
-                            if not has_data:
-                                # La figure est vide, on ne la retourne pas
-                                plotly_fig = None
-                except Exception as e:
-                    plotly_fig = None
-            
-            if plotly_fig is not None:
-                # Sérialiser la figure Plotly en JSON pour transmission
-                try:
-                    plotly_json = plotly_fig.to_json()
-                    return f"📈 Graphique interactif généré\nPLOTLY_JSON::{plotly_json}"
-                except Exception as e:
-                    # Si la sérialisation échoue, on continue avec matplotlib
+                    df_work[time_column] = pd.to_datetime(df_work[time_column])
+                except:
                     pass
-            
-            # Si aucune figure Plotly, vérifier matplotlib (rétrocompatibilité)
-            fig = None
-            if 'fig' in local_vars:
-                try:
-                    from matplotlib.figure import Figure
-                    if isinstance(local_vars['fig'], Figure):
-                        fig = local_vars['fig']
-                except Exception:
-                    fig = None
-            if fig is None:
-                # tente de récupérer la figure courante si existante
-                fig = plt.gcf() if plt.get_fignums() else None
-
-            if fig is not None and plt.get_fignums():
-                try:
-                    os.makedirs('plots', exist_ok=True)
-                    filename = f"plots/plot_{uuid.uuid4().hex}.png"
-                    fig.savefig(filename, bbox_inches='tight')
-                    return f"📈 Graphique généré\nPLOT::{filename}"
-                except Exception as e:
-                    # continue l'extraction des autres résultats si l'enregistrement échoue
-                    pass
-
-            # Récupérer le résultat (cherche 'result' dans les variables)
-            if 'result' in local_vars:
-                result = local_vars['result']
-                if isinstance(result, pd.DataFrame):
-                    return f"✅ Résultat :\n\n{result.to_string()}"
-                elif isinstance(result, pd.Series):
-                    return f"✅ Résultat :\n\n{result.to_string()}"
-                else:
-                    return f"✅ Résultat : {result}"
-            else:
-                return "✅ Code exécuté avec succès (aucun résultat retourné)"
-                
-        except Exception as e:
-            return f"❌ Erreur lors de l'exécution : {str(e)}"
+            df_work = df_work.sort_values(time_column)
+            series = df_work[column].reset_index(drop=True)
+        else:
+            series = self.df[column].sort_index().reset_index(drop=True)
+        
+        # Calculer le taux de croissance
+        growth_rate = series.pct_change(periods=period_int) * 100
+        
+        result = f"📈 Taux de croissance ({period_int} période(s)) pour '{column}' :\n\n"
+        result += f"Valeurs calculées : {len(growth_rate.dropna())} / {len(growth_rate)}\n\n"
+        result += "Dernières valeurs :\n"
+        
+        df_result = pd.DataFrame({
+            'Valeur': series.tail(15),
+            f'Croissance (%)': growth_rate.tail(15)
+        })
+        df_result = df_result[df_result[f'Croissance (%)'].notna()]
+        result += df_result.to_string()
+        
+        # Statistiques
+        growth_clean = growth_rate.dropna()
+        if len(growth_clean) > 0:
+            result += f"\n\n📊 Statistiques de croissance :\n"
+            result += f"Moyenne : {growth_clean.mean():.2f}%\n"
+            result += f"Médiane : {growth_clean.median():.2f}%\n"
+            result += f"Min : {growth_clean.min():.2f}%\n"
+            result += f"Max : {growth_clean.max():.2f}%"
+        
+        return result
     
     def get_tools(self) -> list:
         """
@@ -304,56 +566,36 @@ class CSVTools:
                 func=self.get_correlation,
                 description="Calcule la corrélation entre colonnes numériques. Input: 'col1,col2' pour deux colonnes spécifiques, ou vide pour la matrice complète."
             ),
+            # Outils pour séries temporelles
             Tool(
-                name="python_code_executor",
-                func=self.execute_python_code,
-                description="""Exécute du code Python personnalisé pour des analyses avancées et des graphiques.
-                Contexte:
-                - DataFrame: df (copie des données)
-                - Librairies: pd (pandas), np (numpy), go (plotly.graph_objects), px (plotly.express)
-                IMPORTANT POUR LES GRAPHIQUES :
-                - OBLIGATOIRE: Utilise UNIQUEMENT Plotly pour créer des graphiques (px ou go)
-                - N'utilise JAMAIS matplotlib pour les graphiques
-                - Plotly permet un affichage interactif dynamique (zoom, pan, hover)
-                Résultats attendus:
-                - Pour renvoyer une valeur/tableau: assigne à 'result'
-                  ex: result = df[df['prix'] > 100].shape[0]
-                - Pour tracer un graphique interactif: utilise Plotly OBLIGATOIREMENT
-                  ex histogramme:
-                      import plotly.express as px
-                      # Vérifier que la colonne existe et filtrer les valeurs manquantes
-                      if 'age' in df.columns:
-                          df_clean = df[df['age'].notna()]
-                          if len(df_clean) > 0:
-                              fig = px.histogram(df_clean, x='age', nbins=20, title='Répartition des âges')
-                              fig.update_xaxes(title_text='Âge')
-                              fig.update_yaxes(title_text='Fréquence')
-                              result = 'graph_ok'
-                          else:
-                              result = 'Aucune donnée disponible'
-                      else:
-                          result = 'Colonne introuvable. Colonnes: ' + str(list(df.columns))
-                  ex ligne/courbe:
-                      import plotly.express as px
-                      fig = px.line(df, x='date', y='valeur', title='Évolution dans le temps')
-                      result = 'graph_ok'
-                  ex scatter:
-                      import plotly.express as px
-                      fig = px.scatter(df, x='x', y='y', title='Nuage de points')
-                      result = 'graph_ok'
-                  ex barres:
-                      import plotly.express as px
-                      data = df.groupby('cat')['val'].sum().reset_index()
-                      fig = px.bar(data, x='cat', y='val', title='Valeurs par catégorie')
-                      result = 'graph_ok'
-                  Pour plus de contrôle, utilise plotly.graph_objects (go):
-                      import plotly.graph_objects as go
-                      fig = go.Figure()
-                      fig.add_trace(go.Scatter(x=df['x'], y=df['y'], mode='lines'))
-                      fig.update_layout(title='Mon graphique')
-                      result = 'graph_ok'
-                Les figures Plotly sont automatiquement détectées et affichées de manière interactive dans l'interface.
-                IMPORTANT: Assigne toujours la figure à 'fig' et assigne result = 'graph_ok' à la fin."""
+                name="detect_time_columns",
+                func=self.detect_time_columns,
+                description="Détecte automatiquement les colonnes contenant des dates/timestamps dans le fichier CSV. Utile pour identifier les colonnes temporelles avant d'effectuer des analyses de séries temporelles. Input: vide."
+            ),
+            Tool(
+                name="calculate_trend",
+                func=self.calculate_trend,
+                description="Calcule la tendance (croissance/décroissance) d'une série temporelle. Détecte automatiquement la colonne temporelle si non spécifiée. Input: 'column' ou 'column,time_column'. Exemple: 'ventes' ou 'ventes,date'."
+            ),
+            Tool(
+                name="calculate_moving_average",
+                func=self.calculate_moving_average,
+                description="Calcule la moyenne mobile d'une série temporelle pour lisser les données. Input: 'column,window' ou 'column,window,time_column'. Exemple: 'ventes,7' pour une moyenne mobile sur 7 périodes."
+            ),
+            Tool(
+                name="aggregate_by_period",
+                func=self.aggregate_by_period,
+                description="Agrège les données par période (jour=D, semaine=W, mois=M, trimestre=Q, année=Y). Input: 'column,period,time_column,agg_func'. Exemple: 'ventes,M,date,sum' pour sommer les ventes par mois. agg_func peut être: mean, sum, min, max, count."
+            ),
+            Tool(
+                name="detect_anomalies",
+                func=self.detect_anomalies,
+                description="Détecte les anomalies/outliers dans une série temporelle. Input: 'column,method,threshold'. method peut être 'iqr' ou 'zscore'. Exemple: 'ventes,iqr' ou 'ventes,zscore,3'."
+            ),
+            Tool(
+                name="calculate_growth_rate",
+                func=self.calculate_growth_rate,
+                description="Calcule le taux de croissance en pourcentage entre périodes. Input: 'column,time_column,period'. Exemple: 'ventes,date,1' pour la croissance période par période, ou 'ventes,date,12' pour la croissance sur 12 périodes."
             ),
         ]
         
