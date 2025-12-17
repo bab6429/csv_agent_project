@@ -8,6 +8,7 @@ from typing import Optional
 from csv_tools import CSVTools
 from .time_series_agent import TimeSeriesAgent
 from .transformation_agent import TransformationAgent
+from .data_viz_agent import DataVizAgent
 from config import Config
 from llm_factory import get_llm
 
@@ -31,6 +32,7 @@ class OrchestratorAgent:
         self.csv_path = csv_path
         self.verbose = verbose
         self.last_llm_call_time = 0
+        self.llm_counter = {"count": 0}
         
         # Initialisation du LLM pour le routing (léger, rapide)
         # Utilise Ollama si disponible, sinon fallback vers Gemini
@@ -65,13 +67,22 @@ class OrchestratorAgent:
         self.time_series_agent = TimeSeriesAgent(
             csv_tools=self.csv_tools,
             api_key=api_key,
-            verbose=verbose
+            verbose=verbose,
+            llm_counter=self.llm_counter,
         )
         
         self.transformation_agent = TransformationAgent(
             csv_tools=self.csv_tools,
             api_key=api_key,
-            verbose=verbose
+            verbose=verbose,
+            llm_counter=self.llm_counter,
+        )
+
+        self.data_viz_agent = DataVizAgent(
+            csv_tools=self.csv_tools,
+            api_key=api_key,
+            verbose=verbose,
+            llm_counter=self.llm_counter,
         )
         
         print("✅ Orchestrateur prêt !\n")
@@ -84,7 +95,7 @@ class OrchestratorAgent:
             question: La question de l'utilisateur
             
         Returns:
-            'time_series' ou 'transformation'
+            'time_series', 'transformation' ou 'visualization'
         """
         # Gestion du délai entre appels LLM
         current_time = time.time()
@@ -120,10 +131,16 @@ Agents disponibles:
    - Filtrage, groupement de données
    - Manipulation et transformation de données
 
-Réponds UNIQUEMENT par un seul mot: "time_series" ou "transformation"
+3. visualization - Pour les questions sur:
+   - Graphiques, courbes, nuages de points, histogrammes, barres
+   - Heatmaps de corrélation
+   - Toute demande de tracé ou d'affichage visuel
+
+Réponds UNIQUEMENT par un seul mot: "time_series", "transformation" ou "visualization"
 Ne réponds rien d'autre, juste le nom de l'agent."""
         
         try:
+            self.llm_counter["count"] += 1
             response = self.routing_llm.invoke(routing_prompt)
             agent_type = response.content.strip().lower()
             
@@ -132,6 +149,8 @@ Ne réponds rien d'autre, juste le nom de l'agent."""
                 return 'time_series'
             elif 'transformation' in agent_type:
                 return 'transformation'
+            elif 'visualization' in agent_type or 'visualisation' in agent_type:
+                return 'visualization'
             else:
                 # Fallback: utiliser transformation par défaut
                 if self.verbose:
@@ -165,6 +184,8 @@ Ne réponds rien d'autre, juste le nom de l'agent."""
             return self.time_series_agent.query(question)
         elif agent_type == 'transformation':
             return self.transformation_agent.query(question)
+        elif agent_type == 'visualization':
+            return self.data_viz_agent.query(question)
         else:
             # Par défaut, utiliser l'agent transformation
             return self.transformation_agent.query(question)
@@ -172,4 +193,8 @@ Ne réponds rien d'autre, juste le nom de l'agent."""
     def get_dataframe(self):
         """Retourne le DataFrame pandas pour un accès direct si nécessaire"""
         return self.csv_tools.df
+
+    def get_llm_iterations(self) -> int:
+        """Retourne le nombre d'appels LLM effectués depuis le chargement de l'agent"""
+        return int(self.llm_counter.get("count", 0))
 

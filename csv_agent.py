@@ -88,6 +88,12 @@ class CSVAgent:
         """
         return self.orchestrator.get_dataframe()
 
+    def get_llm_iterations(self) -> int:
+        """
+        Retourne le nombre d'appels LLM effectués depuis le chargement de l'agent
+        """
+        return self.orchestrator.get_llm_iterations()
+
 if __name__ == "__main__":
     # Exemple d'utilisation
     print("🚀 Démonstration de l'agent CSV\n")

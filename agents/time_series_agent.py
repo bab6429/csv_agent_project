@@ -4,6 +4,7 @@ Agent spécialisé dans l'analyse de séries temporelles
 import os
 import time
 from typing import Optional
+from callbacks import LLMIterationCounter
 from langchain.agents import AgentExecutor, create_react_agent
 from langchain.prompts import PromptTemplate
 from langchain.tools import Tool
@@ -17,7 +18,7 @@ class TimeSeriesAgent:
     Agent spécialisé dans l'analyse de séries temporelles
     """
     
-    def __init__(self, csv_tools: CSVTools, api_key: Optional[str] = None, verbose: bool = True):
+    def __init__(self, csv_tools: CSVTools, api_key: Optional[str] = None, verbose: bool = True, llm_counter: Optional[dict] = None):
         """
         Initialise l'agent Time Series
         
@@ -29,6 +30,7 @@ class TimeSeriesAgent:
         self.csv_tools = csv_tools
         self.verbose = verbose
         self.last_llm_call_time = 0
+        self.callbacks = [LLMIterationCounter(llm_counter)] if llm_counter is not None else None
         
         # Initialisation du LLM (Ollama en priorité, fallback Gemini)
         self.llm = get_llm(
@@ -65,6 +67,7 @@ class TimeSeriesAgent:
             max_execution_time=Config.MAX_EXECUTION_TIME,
             return_intermediate_steps=True,
             early_stopping_method="force",
+            callbacks=self.callbacks,
         )
     
     def _get_max_iterations(self) -> Optional[int]:

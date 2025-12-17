@@ -4,6 +4,7 @@ Interface Streamlit pour l'agent CSV
 import streamlit as st
 import pandas as pd
 import os
+import base64
 from csv_agent import CSVAgent
 
 # Configuration de la page
@@ -75,6 +76,13 @@ with st.sidebar:
     st.subheader("Options de l'agent")
     verbose = st.checkbox("Mode verbeux (afficher le raisonnement)", value=False)
 
+    # Compteur LLM
+    if st.session_state.get("agent") is not None:
+        try:
+            st.metric("Appels LLM (session)", st.session_state.agent.get_llm_iterations())
+        except Exception:
+            st.caption("Compteur LLM non disponible.")
+
 # Initialisation de la session state
 if 'agent' not in st.session_state:
     st.session_state.agent = None
@@ -82,16 +90,58 @@ if 'chat_history' not in st.session_state:
     st.session_state.chat_history = []
 if 'csv_uploaded' not in st.session_state:
     st.session_state.csv_uploaded = False
+if 'current_file_name' not in st.session_state:
+    st.session_state.current_file_name = None
+if 'current_file_hash' not in st.session_state:
+    st.session_state.current_file_hash = None
+if 'llm_iterations' not in st.session_state:
+    st.session_state.llm_iterations = 0
+
+
+def render_agent_answer(answer: str):
+    """Affiche la réponse et rend l'image si un payload base64 est présent."""
+    marker_start = "__PLOT_BASE64_START__"
+    marker_end = "__PLOT_BASE64_END__"
+
+    if marker_start in answer and marker_end in answer:
+        prefix, rest = answer.split(marker_start, 1)
+        payload, suffix = rest.split(marker_end, 1)
+
+        prefix = prefix.strip()
+        suffix = suffix.strip()
+        payload = payload.strip()
+
+        if prefix:
+            st.write(prefix)
+        try:
+            img_bytes = base64.b64decode(payload)
+            st.image(img_bytes, use_container_width=True)
+        except Exception:
+            st.warning("⚠️ Impossible d'afficher le graphique (payload invalide).")
+        if suffix:
+            st.write(suffix)
+    else:
+        st.write(answer)
 
 # Si un fichier de données est uploadé via la sidebar
 if data_file is not None:
     # Sauvegarder temporairement le fichier
+    import hashlib
+
+    file_bytes = data_file.getvalue()
     temp_csv_path = f"temp_{data_file.name}"
     with open(temp_csv_path, "wb") as f:
-        f.write(data_file.getbuffer())
-    
-    # Créer l'agent si ce n'est pas déjà fait ou si c'est un nouveau fichier
-    if st.session_state.agent is None or not st.session_state.csv_uploaded:
+        f.write(file_bytes)
+
+    file_hash = hashlib.md5(file_bytes).hexdigest()
+    file_changed = (
+        st.session_state.agent is None
+        or st.session_state.current_file_name != data_file.name
+        or st.session_state.current_file_hash != file_hash
+    )
+
+    # Créer ou recréer l'agent si le fichier change
+    if file_changed:
         try:
             with st.spinner("🔧 Initialisation de l'agent..."):
                 st.session_state.agent = CSVAgent(
@@ -101,6 +151,8 @@ if data_file is not None:
                 )
                 st.session_state.csv_uploaded = True
                 st.session_state.chat_history = []
+                st.session_state.current_file_name = data_file.name
+                st.session_state.current_file_hash = file_hash
             st.success("✅ Fichier chargé et agent prêt !")
         except Exception as e:
             st.error(f"❌ Erreur lors de l'initialisation : {str(e)}")
@@ -119,7 +171,7 @@ if data_file is not None:
             with st.chat_message("user"):
                 st.write(question)
             with st.chat_message("assistant"):
-                st.write(answer)
+                render_agent_answer(answer)
     
     # Exemples de questions
     with st.expander("💡 Exemples de questions"):
@@ -146,11 +198,16 @@ if data_file is not None:
             with st.spinner("🤔 L'agent réfléchit..."):
                 try:
                     answer = st.session_state.agent.query(question)
-                    # Afficher la réponse
-                    st.write(answer)
+                    # Afficher la réponse (texte + éventuel graphique)
+                    render_agent_answer(answer)
                     
                     # Ajouter à l'historique
                     st.session_state.chat_history.append((question, answer))
+                    # Mettre à jour le compteur LLM
+                    try:
+                        st.session_state.llm_iterations = st.session_state.agent.get_llm_iterations()
+                    except Exception:
+                        pass
                 except Exception as e:
                     error_msg = f"❌ Erreur : {str(e)}"
                     st.error(error_msg)
