@@ -4,11 +4,14 @@ Utilise un LLM pour un routing intelligent
 """
 import os
 import time
-from typing import Optional
+import json
+from typing import Optional, List, Dict, Any
+import pandas as pd
 from csv_tools import CSVTools
 from .time_series_agent import TimeSeriesAgent
 from .transformation_agent import TransformationAgent
 from .data_viz_agent import DataVizAgent
+from .plot_commentary_agent import PlotCommentaryAgent
 from config import Config
 from llm_factory import get_llm
 
@@ -40,8 +43,8 @@ class OrchestratorAgent:
         try:
             self.routing_llm = get_llm(
                 model_name=Config.MODEL_NAME,
-                temperature=0,  # Déterministe pour le routing
-                max_output_tokens=50,  # Très court, juste pour choisir l'agent
+                temperature=0,  # Déterministe pour le routing/plan
+                max_output_tokens=1000,  # Plus de marge pour le JSON de plan
                 max_retries=2,
                 api_key=api_key,
                 verbose=verbose
@@ -84,111 +87,203 @@ class OrchestratorAgent:
             verbose=verbose,
             llm_counter=self.llm_counter,
         )
+
+        self.plot_commentary_agent = PlotCommentaryAgent(
+            api_key=api_key,
+            verbose=verbose,
+            llm_counter=self.llm_counter,
+        )
         
         print("✅ Orchestrateur prêt !\n")
     
-    def _detect_agent_type(self, question: str) -> str:
+    def _plan_agents(self, question: str) -> List[Dict[str, Any]]:
         """
-        Détecte quel agent spécialisé doit traiter la question en utilisant un LLM
-        
-        Args:
-            question: La question de l'utilisateur
-            
-        Returns:
-            'time_series', 'transformation' ou 'visualization'
+        Planifie 1 à 3 étapes avec les agents disponibles.
+        Retour: liste de dicts {agent, instruction}
         """
-        # Gestion du délai entre appels LLM
         current_time = time.time()
         time_since_last_call = current_time - self.last_llm_call_time
         if time_since_last_call < Config.LLM_REQUEST_DELAY:
-            delay_needed = Config.LLM_REQUEST_DELAY - time_since_last_call
-            time.sleep(delay_needed)
-        
+            time.sleep(Config.LLM_REQUEST_DELAY - time_since_last_call)
         self.last_llm_call_time = time.time()
-        
-        # Prompt pour le LLM de routing
-        routing_prompt = f"""Tu es un routeur intelligent. Analyse cette question et détermine quel agent spécialisé doit la traiter.
 
-Question: "{question}"
+        agents_desc = (
+            "Agents disponibles:\n"
+            "- transformation: structure, stats, valeurs manquantes, corrélations, aperçu.\n"
+            "- time_series: préparation (fusion date/heure), tendances, moyennes mobiles, agrégations temporelles, anomalies.\n"
+            "- visualization: tracés (courbe, scatter, bar, hist, heatmap corr), avec colonnes réelles.\n"
+            "- plot_commentary: commente un graphique à partir du résumé JSON produit par visualization.\n"
+        )
+        prompt = (
+            "Tu es un planificateur. Propose un plan de 1 à 3 étapes pour répondre à la question.\n"
+            f"{agents_desc}\n"
+            "Règles de planification:\n"
+            "- IMPORTANT: Si l'utilisateur demande un sous-ensemble de données (ex: une plage de dates, une catégorie, un mois précis), la PREMIÈRE étape DOIT être d'utiliser un outil de filtrage ('filter_data' ou 'filter_by_date') via l'agent 'transformation' ou 'time_series'.\n"
+            "- Simplement afficher les données avec 'get_head' n'est PAS suffisant pour que les étapes suivantes (comme la visualisation) en profitent.\n"
+            "- N'ajoute une étape 'visualization' QUE si l'utilisateur demande EXPLICITEMENT un graphique/tracé/courbe/plot/heatmap/histogramme.\n"
+            "- L'agent 'visualization' utilisera automatiquement les données filtrées par les étapes précédentes.\n"
+            "- Ajoute TOUJOURS une étape 'plot_commentary' à la fin pour fournir une petite analyse (5-8 lignes) basée sur les résultats précédents.\n"
+            "Formate en JSON strict: {\"steps\": [{\"agent\": \"...\", \"instruction\": \"...\"}, ...]}\n"
+            "- agent ∈ {transformation, time_series, visualization, plot_commentary}\n"
+            "- instruction: consigne concise en français.\n"
+            "- Pas de texte hors JSON.\n"
+            f"Question: {question}"
+        )
+        try:
+            self.llm_counter["count"] += 1
+            resp = self.routing_llm.invoke(prompt)
+            content = resp.content if hasattr(resp, "content") else str(resp)
+            if self.verbose:
+                print(f"📜 Plan LLM (brut): {content!r}")
 
-Agents disponibles:
-1. time_series - Pour les questions sur:
-   - Tendances, croissance, décroissance
-   - Séries temporelles, données temporelles
-   - Moyennes mobiles, lissage
-   - Agrégations par période (jour, semaine, mois, année)
-   - Saisonnalité, patterns temporels
-   - Prévisions, forecasts
-   - Taux de croissance temporels
-   - Anomalies dans des séries temporelles
+            # Nettoyage: retirer fences ```json ... ``` et extraire le premier objet JSON
+            cleaned = (content or "").strip()
+            if cleaned.startswith("```"):
+                # enlève la première ligne ```json / ``` et la dernière ```
+                cleaned = cleaned.strip("`").strip()
+            # Extraire le premier {...} si du texte s'est glissé
+            if "{" in cleaned and "}" in cleaned:
+                cleaned = cleaned[cleaned.find("{"): cleaned.rfind("}") + 1]
 
-2. transformation - Pour les questions sur:
-   - Structure du fichier, colonnes, types de données
-   - Aperçu des données (premières lignes)
-   - Statistiques descriptives (moyenne, médiane, etc.)
-   - Valeurs manquantes, qualité des données
-   - Corrélations entre colonnes
-   - Filtrage, groupement de données
-   - Manipulation et transformation de données
+            plan = json.loads(cleaned)
+            steps = plan.get("steps", [])
+            if not isinstance(steps, list) or not steps:
+                raise ValueError("steps manquant")
+            valid = []
+            for step in steps[:3]:
+                agent = step.get("agent", "").strip().lower()
+                instr = step.get("instruction", "").strip()
+                if agent in ["transformation", "time_series", "visualization", "plot_commentary"] and instr:
+                    valid.append({"agent": agent, "instruction": instr})
+            if not valid:
+                raise ValueError("steps invalides")
+            return valid
+        except Exception as e:
+            if self.verbose:
+                print(f"⚠️ Planification LLM échouée ({e}), fallback transformation.")
+            return [{"agent": "transformation", "instruction": "Réponds à la question de l'utilisateur."}]
 
-3. visualization - Pour les questions sur:
-   - Graphiques, courbes, nuages de points, histogrammes, barres
-   - Heatmaps de corrélation
-   - Toute demande de tracé ou d'affichage visuel
-
-Réponds UNIQUEMENT par un seul mot: "time_series", "transformation" ou "visualization"
-Ne réponds rien d'autre, juste le nom de l'agent."""
+    def _synthesize_response(self, question: str, full_context: str) -> str:
+        """
+        Utilise le LLM pour synthétiser la réponse finale à partir de tout le contexte.
+        Filtre le bavardage inutile et ne garde que la valeur ajoutée.
+        """
+        prompt = (
+            "Tu es l'orchestrateur final d'un système multi-agents d'analyse de données.\n"
+            "Ta tâche est de produire une réponse PROPRE, CONCISE et PROFESSIONNELLE à l'utilisateur.\n\n"
+            "RÈGLES DE SYNTHÈSE :\n"
+            "1. Supprime tout le 'bavardage' interne des agents (ex: 'Je vais maintenant...', 'Étape 1 terminée', 'Vous pouvez utiliser...').\n"
+            "2. Garde UNIQUEMENT la réponse finale à la question, les statistiques importantes et les tableaux de données s'ils sont pertinents.\n"
+            "3. IMPORTANT : Garde les marqueurs de graphiques (PLOT_ID_START/END et PLOT_SUMMARY_START/END) EXACTEMENT tels quels, sans les modifier. Ils sont cruciaux pour l'affichage.\n"
+            "4. Si une analyse (commentaire) est présente, fusionne-la intelligemment avec la réponse.\n"
+            "5. Réponds TOUJOURS en français.\n"
+            "6. Ne mentionne pas les noms techniques des agents (ex: 'L'agent transformation dit...'). Présente les faits directement.\n\n"
+            f"Question de l'utilisateur : {question}\n\n"
+            f"Contenu brut des agents :\n{full_context}\n\n"
+            "Réponse synthétisée :"
+        )
         
         try:
             self.llm_counter["count"] += 1
-            response = self.routing_llm.invoke(routing_prompt)
-            agent_type = response.content.strip().lower()
-            
-            # Validation et normalisation
-            if 'time_series' in agent_type or 'timeseries' in agent_type:
-                return 'time_series'
-            elif 'transformation' in agent_type:
-                return 'transformation'
-            elif 'visualization' in agent_type or 'visualisation' in agent_type:
-                return 'visualization'
-            else:
-                # Fallback: utiliser transformation par défaut
-                if self.verbose:
-                    print(f"⚠️ Réponse LLM non reconnue: '{agent_type}', utilisation de 'transformation' par défaut")
-                return 'transformation'
-                
+            resp = self.routing_llm.invoke(prompt)
+            final_text = resp.content if hasattr(resp, "content") else str(resp)
+            return final_text.strip()
         except Exception as e:
-            # En cas d'erreur, fallback vers transformation
             if self.verbose:
-                print(f"⚠️ Erreur lors du routing LLM: {e}, utilisation de 'transformation' par défaut")
-            return 'transformation'
-    
+                print(f"⚠️ Synthèse échouée ({e}), retour au mode concaténation.")
+            return None
+
     def query(self, question: str) -> str:
         """
-        Traite une question en la routant vers l'agent approprié
-        
-        Args:
-            question: La question de l'utilisateur
-            
-        Returns:
-            La réponse de l'agent spécialisé
+        Exécute 1 à 3 agents en séquence selon un plan LLM.
+        Le texte produit par chaque agent est passé en contexte au suivant.
         """
-        # Détecter quel agent doit traiter la question
-        agent_type = self._detect_agent_type(question)
+        # Réinitialiser les filtres au début de chaque nouvelle question
+        self.csv_tools.reset_filter()
         
-        if self.verbose:
-            print(f"🔀 Routing vers l'agent: {agent_type}")
+        steps = self._plan_agents(question)
+        context_text = ""
+        last_answer = ""
+        viz_answer = ""
+        commentary_answer = ""
+
+        agent_map = {
+            "transformation": self.transformation_agent,
+            "time_series": self.time_series_agent,
+            "visualization": self.data_viz_agent,
+            "plot_commentary": self.plot_commentary_agent,
+        }
+
+        for idx, step in enumerate(steps, start=1):
+            agent_name = step["agent"]
+            instruction = step["instruction"]
+            agent = agent_map.get(agent_name)
+            if agent is None:
+                continue
+
+            composed_question = (
+                f"Contexte des étapes précédentes:\n{context_text}\n\n"
+                f"Instruction: {instruction}\n\n"
+                f"Question utilisateur: {question}"
+            )
+            if self.verbose:
+                print(f"➡️ Étape {idx}: {agent_name} avec instruction '{instruction}'")
+            if agent_name == "plot_commentary":
+                # On attend que le contexte contienne PLOT_SUMMARY (JSON) produit par visualization ou des stats
+                analysis_prompt = (
+                    "Tu es un analyste data. On te fournit le contexte des étapes précédentes.\n"
+                    "Donne une analyse courte (5-8 lignes max) des résultats : tendances, extrêmes, relations, et ce que ça implique pour la question.\n"
+                    "Si un PLOT_SUMMARY est présent, base-toi dessus. Sinon, base-toi sur les statistiques et données textuelles fournies.\n\n"
+                    f"{composed_question}"
+                )
+                answer = agent.query(analysis_prompt)
+                commentary_answer = answer
+            else:
+                answer = agent.query(composed_question)
+                if agent_name == "visualization":
+                    viz_answer = answer
+
+            context_text += f"\n\n[Étape {idx} - {agent_name}]:\n{answer}"
+            last_answer = answer
+
+        if not last_answer:
+            last_answer = self.transformation_agent.query(question)
+
+        # Tentative de synthèse intelligente
+        synthesized = self._synthesize_response(question, context_text)
+        if synthesized:
+            return synthesized
+
+        # Fallback : construction manuelle si la synthèse échoue
+        previous_outputs = []
+        for idx, step in enumerate(steps, start=1):
+            if step["agent"] in ["visualization", "plot_commentary"]:
+                continue
+            marker = f"[Étape {idx} - {step['agent']}]:"
+            if marker in context_text:
+                start_idx = context_text.find(marker) + len(marker)
+                next_marker = f"[Étape {idx + 1} -"
+                if next_marker in context_text:
+                    end_idx = context_text.find(next_marker)
+                    agent_output = context_text[start_idx:end_idx].strip()
+                else:
+                    agent_output = context_text[start_idx:].strip()
+                if agent_output:
+                    previous_outputs.append(agent_output)
         
-        # Router vers l'agent approprié
-        if agent_type == 'time_series':
-            return self.time_series_agent.query(question)
-        elif agent_type == 'transformation':
-            return self.transformation_agent.query(question)
-        elif agent_type == 'visualization':
-            return self.data_viz_agent.query(question)
-        else:
-            # Par défaut, utiliser l'agent transformation
-            return self.transformation_agent.query(question)
+        final_response = ""
+        if previous_outputs:
+            final_response = "\n\n".join(previous_outputs) + "\n\n"
+        
+        if viz_answer:
+            final_response += viz_answer
+        elif not final_response and last_answer and last_answer != commentary_answer:
+            final_response = last_answer
+
+        if commentary_answer:
+            final_response += f"\n\n📝 Analyse:\n{commentary_answer}"
+        
+        return final_response.strip() if final_response else last_answer
     
     def get_dataframe(self):
         """Retourne le DataFrame pandas pour un accès direct si nécessaire"""

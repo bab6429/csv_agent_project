@@ -108,6 +108,21 @@ class TransformationAgent:
                 func=self.csv_tools.count_missing,
                 description="Compte les valeurs manquantes dans chaque colonne. Input: vide."
             ),
+            Tool(
+                name="create_column",
+                func=self.csv_tools.create_column,
+                description="Crée une nouvelle colonne en effectuant des opérations sur les colonnes existantes. Input: 'nom_nouvelle_colonne,expression'. Exemples: 'total,prix * quantite' ou 'nom_complet,prenom + \" \" + nom' ou 'prix_ttc,prix * 1.2'."
+            ),
+            Tool(
+                name="filter_data",
+                func=self.csv_tools.filter_data,
+                description="Filtre les données en place selon une condition (syntaxe pandas query). Exemple: 'Salaire > 50000' ou 'Ville == \"Paris\"'. Utile avant de tracer un graphique sur un sous-ensemble."
+            ),
+            Tool(
+                name="reset_filter",
+                func=self.csv_tools.reset_filter,
+                description="Réinitialise tous les filtres et restaure le dataset complet. Input: vide."
+            ),
         ]
     
     def _create_prompt(self):
@@ -145,6 +160,7 @@ RÈGLES IMPORTANTES :
 7. Utilise 'get_head' pour voir un aperçu des données
 8. Utilise 'get_statistics' pour les statistiques descriptives - INCLUS TOUJOURS les valeurs dans ta réponse
 9. Utilise 'count_missing_values' pour vérifier la qualité des données
+10. Utilise 'create_column' pour créer de nouvelles colonnes basées sur des opérations sur les colonnes existantes
 
 STRATÉGIE D'ANALYSE :
 - Étape 1 : Si tu ne connais pas la structure, utilise 'get_csv_info' pour découvrir les colonnes disponibles
@@ -173,6 +189,18 @@ Action Input:
 Pour vérifier les valeurs manquantes :
 Action: count_missing_values
 Action Input: 
+
+Pour créer une nouvelle colonne (opération arithmétique) :
+Action: create_column
+Action Input: total,prix * quantite
+
+Pour créer une nouvelle colonne (concaténation de texte) :
+Action: create_column
+Action Input: nom_complet,prenom + " " + nom
+
+Pour créer une nouvelle colonne (calcul avec constante) :
+Action: create_column
+Action Input: prix_ttc,prix * 1.2
 
 Commence maintenant !
 

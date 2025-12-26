@@ -5,7 +5,9 @@ import streamlit as st
 import pandas as pd
 import os
 import base64
+import re
 from csv_agent import CSVAgent
+from plot_registry import get_plot
 
 # Configuration de la page
 st.set_page_config(
@@ -74,7 +76,7 @@ with st.sidebar:
 
     # Options de l'agent
     st.subheader("Options de l'agent")
-    verbose = st.checkbox("Mode verbeux (afficher le raisonnement)", value=False)
+    verbose = st.checkbox("Mode verbeux (afficher le raisonnement)", value=True)
 
     # Compteur LLM
     if st.session_state.get("agent") is not None:
@@ -100,28 +102,171 @@ if 'llm_iterations' not in st.session_state:
 
 def render_agent_answer(answer: str):
     """Affiche la réponse et rend l'image si un payload base64 est présent."""
-    marker_start = "__PLOT_BASE64_START__"
-    marker_end = "__PLOT_BASE64_END__"
+    # Cas 0 : plot_id in-memory (Plotly)
+    pattern_plot_id = re.compile(
+        r"(?:__)?PLOT_ID_START(?:__)?\s*(.*?)\s*(?:__)?PLOT_ID_END(?:__)?",
+        re.IGNORECASE | re.DOTALL,
+    )
+    plot_matches = list(pattern_plot_id.finditer(answer))
+    if plot_matches:
+        last_idx = 0
+        for m in plot_matches:
+            prefix = answer[last_idx:m.start()].strip()
+            if prefix:
+                st.write(prefix)
+            plot_id = m.group(1).strip()
+            artifact = get_plot(plot_id)
+            if artifact and artifact.figure is not None:
+                try:
+                    # Extraction des données de la figure Plotly
+                    if artifact.figure.data:
+                        trace = artifact.figure.data[0]
+                        
+                        # Préparation du DataFrame
+                        data_dict = {"x": trace.x, "y": trace.y}
+                        if hasattr(trace, "marker") and trace.marker and "color" in trace.marker:
+                             # Si on a des couleurs (ex: scatter avec hue), on pourrait essayer de les gérer
+                             # Mais pour l'instant restons simple
+                             pass
+                             
+                        df_native = pd.DataFrame(data_dict)
+                        
+                        # Gestion selon le type de graphique
+                        kind = artifact.kind.lower()
+                        
+                        # Conversion de l'axe X en datetime si possible pour un meilleur rendu
+                        if "x" in df_native.columns:
+                            try:
+                                # On essaie de convertir en datetime pour que Streamlit gère l'axe temporel
+                                df_native["x"] = pd.to_datetime(df_native["x"])
+                            except:
+                                pass
+                        
+                        if kind == "line":
+                            if "x" in df_native.columns:
+                                df_native = df_native.set_index("x")
+                            st.line_chart(df_native)
+                            
+                        elif kind == "bar":
+                            if "x" in df_native.columns:
+                                df_native = df_native.set_index("x")
+                            st.bar_chart(df_native)
+                            
+                        elif kind == "scatter":
+                            if hasattr(st, "scatter_chart"):
+                                st.scatter_chart(df_native, x="x", y="y")
+                            else:
+                                # Fallback sur Altair pour scatter si scatter_chart n'existe pas
+                                st.vega_lite_chart(df_native, {
+                                    'mark': {'type': 'circle', 'tooltip': True},
+                                    'encoding': {
+                                        'x': {'field': 'x', 'type': 'quantitative' if not pd.api.types.is_datetime64_any_dtype(df_native['x']) else 'temporal'},
+                                        'y': {'field': 'y', 'type': 'quantitative'},
+                                    },
+                                }, use_container_width=True)
+                                
+                        elif kind == "hist":
+                            if "x" in df_native.columns and "y" in df_native.columns:
+                                df_native.columns = ["Plage", "Fréquence"]
+                                df_native = df_native.set_index("Plage")
+                                st.bar_chart(df_native)
+                            else:
+                                st.warning("Données d'histogramme mal formatées")
+                            
+                        elif kind == "corr_heatmap":
+                            st.write("**Matrice de corrélation**")
+                            if hasattr(trace, 'z'):
+                                corr_data = trace.z
+                                if hasattr(trace, 'x') and hasattr(trace, 'y'):
+                                    corr_df = pd.DataFrame(corr_data, index=trace.y, columns=trace.x)
+                                else:
+                                    corr_df = pd.DataFrame(corr_data)
+                                st.dataframe(corr_df.style.background_gradient(cmap='RdBu', vmin=-1, vmax=1).format("{:.2f}"))
+                            else:
+                                st.info("Impossible d'extraire la matrice de corrélation.")
+                            
+                        else:
+                            st.info(f"Type de graphique '{kind}' non supporté en mode natif.")
+                            
+                    else:
+                        st.info("Pas de données extractibles pour l'affichage.")
+                except Exception as e:
+                    st.warning(f"Erreur d'affichage : {e}")
+            else:
+                st.warning("⚠️ Impossible d'afficher le graphique (plot introuvable en mémoire).")
+            last_idx = m.end()
+        suffix = answer[last_idx:].strip()
+        if suffix:
+            # On cache les blocs summary JSON dans l'UI (ils servent à l'agent de commentaire)
+            suffix = re.sub(r"(?:__)?PLOT_SUMMARY_START(?:__)?[\s\S]*?(?:__)?PLOT_SUMMARY_END(?:__)?", "", suffix, flags=re.IGNORECASE).strip()
+            if suffix:
+                st.write(suffix)
 
-    if marker_start in answer and marker_end in answer:
-        prefix, rest = answer.split(marker_start, 1)
-        payload, suffix = rest.split(marker_end, 1)
+        return
 
-        prefix = prefix.strip()
-        suffix = suffix.strip()
-        payload = payload.strip()
+    # Cas A : chemin de fichier renvoyé par DataViz (recommandé)
+    pattern_file = re.compile(
+        r"(?:__)?PLOT_FILE_START(?:__)?\s*(.*?)\s*(?:__)?PLOT_FILE_END(?:__)?",
+        re.IGNORECASE | re.DOTALL,
+    )
+    file_matches = list(pattern_file.finditer(answer))
+    if file_matches:
+        last_idx = 0
+        for m in file_matches:
+            prefix = answer[last_idx:m.start()].strip()
+            if prefix:
+                st.write(prefix)
+            path = m.group(1).strip()
+            try:
+                st.image(path, use_container_width=True)
+            except Exception:
+                st.warning("⚠️ Impossible d'afficher le graphique (fichier introuvable ou non lisible).")
+            last_idx = m.end()
+        suffix = answer[last_idx:].strip()
+        if suffix:
+            st.write(suffix)
+        return
 
+    # Cas 1 : bloc complet START...END
+    pattern_full = re.compile(
+        r"(?:__)?PLOT_BASE64_START(?:__)?\s*(.*?)\s*(?:__)?PLOT_BASE64_END(?:__)?",
+        re.IGNORECASE | re.DOTALL,
+    )
+    matches = list(pattern_full.finditer(answer))
+
+    # Cas 2 : START sans END (on prend jusqu'à la fin)
+    if not matches:
+        pattern_start_only = re.compile(
+            r"(?:__)?PLOT_BASE64_START(?:__)?\s*(.*)",
+            re.IGNORECASE | re.DOTALL,
+        )
+        matches = list(pattern_start_only.finditer(answer))
+
+    if not matches:
+        st.write(answer)
+        return
+
+    last_idx = 0
+    for m in matches:
+        # Texte avant le bloc
+        prefix = answer[last_idx:m.start()].strip()
         if prefix:
             st.write(prefix)
+
+        payload = m.group(1).strip()
+        # Retirer espaces/retours multiples éventuels
+        payload_clean = "".join(payload.split())
         try:
-            img_bytes = base64.b64decode(payload)
+            img_bytes = base64.b64decode(payload_clean)
             st.image(img_bytes, use_container_width=True)
         except Exception:
             st.warning("⚠️ Impossible d'afficher le graphique (payload invalide).")
-        if suffix:
-            st.write(suffix)
-    else:
-        st.write(answer)
+        last_idx = m.end()
+
+    # Texte après le dernier bloc
+    suffix = answer[last_idx:].strip()
+    if suffix:
+        st.write(suffix)
 
 # Si un fichier de données est uploadé via la sidebar
 if data_file is not None:
@@ -217,6 +362,17 @@ if data_file is not None:
     if st.session_state.chat_history:
         if st.button("🗑️ Effacer l'historique"):
             st.session_state.chat_history = []
+            # Réinitialiser l'agent pour effacer sa mémoire interne
+            try:
+                with st.spinner("🔄 Réinitialisation de l'agent..."):
+                    st.session_state.agent = CSVAgent(
+                        temp_csv_path,
+                        api_key=api_key if api_key else None,
+                        verbose=verbose
+                    )
+                st.success("✅ Historique effacé et agent réinitialisé !")
+            except Exception as e:
+                st.error(f"❌ Erreur lors de la réinitialisation : {str(e)}")
             st.rerun()
     
     # Nettoyage du fichier temporaire lors de la fermeture (optionnel)
